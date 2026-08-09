@@ -12,6 +12,8 @@ with an ActionResult(error=...) instead of hanging.
 """
 
 import asyncio
+import subprocess
+import sys
 import time
 from typing import Any
 
@@ -157,3 +159,24 @@ def test_malformed_env_timeout_does_not_break_import():
 
 	# Valid finite positive values still take effect.
 	assert _parse_env_action_timeout('45') == 45.0
+
+
+@pytest.mark.parametrize('bad_value', ('', 'not-a-number', 'nan', 'inf', '0'))
+def test_malformed_env_timeout_does_not_break_module_import(bad_value):
+	"""The import-time wiring itself (`_DEFAULT_ACTION_TIMEOUT_S = _parse_env_action_timeout(os.getenv(...))`)
+	must not crash or misbehave under a malformed env value.
+
+	Runs in a fresh subprocess (not importlib.reload()) so it exercises a real cold
+	import without rebinding browser_use.tools.service.Tools in the shared pytest
+	process — reload() breaks is/isinstance checks against Tools for every other
+	test in the worker (see test_malformed_env_timeout_does_not_break_import above).
+	"""
+	proc = subprocess.run(
+		[sys.executable, '-c', 'import browser_use.tools.service as m; print(m._DEFAULT_ACTION_TIMEOUT_S)'],
+		env={'BROWSER_USE_ACTION_TIMEOUT_S': bad_value, 'PATH': __import__('os').environ.get('PATH', '')},
+		capture_output=True,
+		text=True,
+		timeout=30,
+	)
+	assert proc.returncode == 0, f'import crashed for env={bad_value!r}: {proc.stderr}'
+	assert proc.stdout.strip() == '180.0', f'Expected fallback 180.0 for env={bad_value!r}, got {proc.stdout.strip()!r}'
