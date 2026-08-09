@@ -41,6 +41,22 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolated_tmpdir(tmp_path, monkeypatch):
+	"""Give each test a private $TMPDIR so a concurrent xdist worker can't pollute the snapshots.
+
+	_snapshot_browser_use_temp_dirs() globs the whole temp root, so under `pytest -n` a sibling
+	worker creating its own browser-use-* dir between a test's before/after snapshots shows up as
+	a phantom leak. Redirecting $TMPDIR keeps every assertion's meaning intact - a genuinely leaked
+	dir still lands in this test's own root and still shows up in the delta - while making the
+	observation window private to this process.
+	"""
+	monkeypatch.setenv('TMPDIR', str(tmp_path))
+	monkeypatch.setattr(tempfile, 'tempdir', None)  # tempfile caches the resolved dir in a module global
+	yield
+	tempfile.tempdir = None
+
+
 def _snapshot_browser_use_temp_dirs() -> set[str]:
 	return set(glob.glob(os.path.join(tempfile.gettempdir(), 'browser-use-*')))
 
