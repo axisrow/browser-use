@@ -41,8 +41,73 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolated_tmpdir(tmp_path, monkeypatch):
+	"""Give each test a private $TMPDIR so a concurrent xdist worker can't pollute the snapshots.
+
+	_snapshot_browser_use_temp_dirs() globs the whole temp root, so under `pytest -n` a sibling
+	worker creating its own browser-use-* dir between a test's before/after snapshots shows up as
+	a phantom leak. Redirecting $TMPDIR keeps every assertion's meaning intact - a genuinely leaked
+	dir still lands in this test's own root and still shows up in the delta - while making the
+	observation window private to this process.
+
+	The tradeoff: a snapshot delta taken here can only see leaks that land in the redirected root,
+	so a production site that binds the temp root at import time (or otherwise ignores a later
+	$TMPDIR change) would leak into the *real* system temp dir, outside the observation window.
+	test_temp_paths_track_the_live_temp_root_not_an_import_time_one covers that gap directly.
+	"""
+	monkeypatch.setenv('TMPDIR', str(tmp_path))
+	# tempfile caches the resolved dir in a module global, so setenv alone is a no-op. monkeypatch
+	# restores the original cached value on teardown, which is what the next test should observe.
+	monkeypatch.setattr(tempfile, 'tempdir', None)
+
+
 def _snapshot_browser_use_temp_dirs() -> set[str]:
 	return set(glob.glob(os.path.join(tempfile.gettempdir(), 'browser-use-*')))
+
+
+def test_temp_paths_track_the_live_temp_root_not_an_import_time_one(tmp_path, monkeypatch):
+	"""Guards the blind spot the autouse redirect creates.
+
+	Every snapshot-delta test here globs `tempfile.gettempdir()`, which under _isolated_tmpdir is
+	the private tmp_path. So a production site that resolves the temp root once - at import time,
+	or by caching gettempdir() - would put its dirs in the *real* system temp root, entirely
+	outside that before/after window, and every one of those tests would still pass. That is the
+	module docstring's original failure mode (7741 dirs / 14GB in the user's real $TMPDIR).
+
+	Detecting import-time binding requires observing from a context where the two roots *differ*:
+	asserting from an unredirected test would compare gettempdir() against itself and hold by
+	construction. So this redirects to a root of its own and asserts the freshly built profile
+	tracks it. A path bound to any earlier root fails here, which is precisely what a snapshot
+	delta cannot see.
+
+	Asserts on paths attributable to the profile it just built rather than on a glob delta - the
+	raw delta is what made these tests flaky under `pytest -n`, since a sibling worker's dirs land
+	in the same root.
+	"""
+	private_root = tmp_path / 'live-temp-root'
+	private_root.mkdir()
+	monkeypatch.setenv('TMPDIR', str(private_root))
+	monkeypatch.setattr(tempfile, 'tempdir', None)
+
+	from browser_use.browser.profile import BrowserProfile
+
+	profile = BrowserProfile()
+
+	assert profile.downloads_path is not None
+	assert not Path(profile.downloads_path).exists(), (
+		f'BrowserProfile() eagerly created its downloads dir: {profile.downloads_path}'
+	)
+	assert Path(profile.downloads_path).resolve().parent == private_root.resolve(), (
+		f'downloads_path is bound to a stale temp root, not the live one: {profile.downloads_path}'
+	)
+
+	# get_args() is the lazy path that materializes user_data_dir - it must track the live root too.
+	profile.get_args()
+	assert profile.user_data_dir is not None
+	assert Path(profile.user_data_dir).resolve().parent == private_root.resolve(), (
+		f'user_data_dir is bound to a stale temp root, not the live one: {profile.user_data_dir}'
+	)
 
 
 def test_constructing_a_profile_creates_no_files_on_disk():
