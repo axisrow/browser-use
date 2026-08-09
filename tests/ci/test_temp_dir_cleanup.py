@@ -52,9 +52,9 @@ def _isolated_tmpdir(tmp_path, monkeypatch):
 	observation window private to this process.
 	"""
 	monkeypatch.setenv('TMPDIR', str(tmp_path))
-	monkeypatch.setattr(tempfile, 'tempdir', None)  # tempfile caches the resolved dir in a module global
-	yield
-	tempfile.tempdir = None
+	# tempfile caches the resolved dir in a module global, so setenv alone is a no-op. monkeypatch
+	# restores the original cached value on teardown, which is what the next test should observe.
+	monkeypatch.setattr(tempfile, 'tempdir', None)
 
 
 def _snapshot_browser_use_temp_dirs() -> set[str]:
