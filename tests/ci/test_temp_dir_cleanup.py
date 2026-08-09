@@ -42,7 +42,7 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolated_tmpdir(tmp_path, monkeypatch):
+def _isolated_tmpdir(request, tmp_path, monkeypatch):
 	"""Give each test a private $TMPDIR so a concurrent xdist worker can't pollute the snapshots.
 
 	_snapshot_browser_use_temp_dirs() globs the whole temp root, so under `pytest -n` a sibling
@@ -50,7 +50,15 @@ def _isolated_tmpdir(tmp_path, monkeypatch):
 	a phantom leak. Redirecting $TMPDIR keeps every assertion's meaning intact - a genuinely leaked
 	dir still lands in this test's own root and still shows up in the delta - while making the
 	observation window private to this process.
+
+	The tradeoff: a snapshot delta taken here can only see leaks that land in the redirected root,
+	so a production site that binds the temp root at import time (or otherwise ignores a later
+	$TMPDIR change) would leak into the *real* system temp dir, outside the observation window.
+	test_no_leak_into_real_system_temp_root covers that gap by opting out via
+	@pytest.mark.real_system_tmpdir.
 	"""
+	if request.node.get_closest_marker('real_system_tmpdir'):
+		return
 	monkeypatch.setenv('TMPDIR', str(tmp_path))
 	# tempfile caches the resolved dir in a module global, so setenv alone is a no-op. monkeypatch
 	# restores the original cached value on teardown, which is what the next test should observe.
@@ -59,6 +67,37 @@ def _isolated_tmpdir(tmp_path, monkeypatch):
 
 def _snapshot_browser_use_temp_dirs() -> set[str]:
 	return set(glob.glob(os.path.join(tempfile.gettempdir(), 'browser-use-*')))
+
+
+@pytest.mark.real_system_tmpdir
+def test_no_leak_into_real_system_temp_root():
+	"""The one test here that deliberately runs against the *real* system temp root.
+
+	Every other test observes a private $TMPDIR (see _isolated_tmpdir), which makes them blind to a
+	leak that lands in the real temp dir - e.g. a production site that resolves the temp root once
+	at import time and so never sees the redirect. That is the exact failure mode this file exists
+	to catch (the module docstring's 7741 dirs / 14GB), so it needs at least one unredirected
+	observation.
+
+	Deliberately does NOT assert on a raw glob delta: that is what made the isolated tests flaky
+	under `pytest -n` in the first place, since a sibling worker's dirs land in the same root.
+	Instead it asserts only on paths it can attribute to the profile it just built, which is
+	immune to concurrent noise.
+	"""
+	from browser_use.browser.profile import BrowserProfile
+
+	profile = BrowserProfile()
+
+	assert profile.downloads_path is not None
+	assert not Path(profile.downloads_path).exists(), (
+		f'BrowserProfile() eagerly created its downloads dir: {profile.downloads_path}'
+	)
+
+	# Any dir the profile reports must live under the temp root as this process currently sees it -
+	# a path bound to some other (e.g. import-time) root is itself the leak this test guards against.
+	temp_root = Path(tempfile.gettempdir()).resolve()
+	downloads_parent = Path(profile.downloads_path).resolve().parent
+	assert downloads_parent == temp_root, f'downloads_path resolved outside the current temp root: {downloads_parent}'
 
 
 def test_constructing_a_profile_creates_no_files_on_disk():

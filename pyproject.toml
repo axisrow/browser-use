@@ -197,6 +197,7 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "asyncio: mark tests as async tests",
+    "real_system_tmpdir: opt out of the per-test $TMPDIR redirect and observe the real system temp root",
 ]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
